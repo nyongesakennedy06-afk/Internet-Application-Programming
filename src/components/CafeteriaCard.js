@@ -15,8 +15,8 @@ const CafeteriaCard = ({ cafeteria }) => {
 
         <div className="cafeteria-card-meta">
           <span>⭐ {cafeteria.rating}</span>
-          <span>🕐 {cafeteria.deliveryTime}</span>
-          <span>📋 {cafeteria.menu.length} items</span>
+          <span>🕐 {cafeteria.deliveryTime || cafeteria.delivery_time}</span>
+          {cafeteria.menu && <span>📋 {cafeteria.menu.length} items</span>}
         </div>
       </div>
     </Link>

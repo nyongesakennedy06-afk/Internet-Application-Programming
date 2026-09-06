@@ -1,8 +1,14 @@
-import data from '../data/data.json';
+import { useEffect, useState } from 'react';
 import CafeteriaCard from '../components/CafeteriaCard.js';
 
 const HomePage = () => {
-  const { cafeterias } = data;
+  const [cafeterias, setCafeterias] = useState([]);
+
+  useEffect(() => {
+    fetch('http://localhost:4000/api/cafeterias')
+      .then(res => res.json())
+      .then(setCafeterias);
+  }, []);
   return (
     <div>
       <section className='hero'>
