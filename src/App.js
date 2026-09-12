@@ -3,6 +3,9 @@ import Layout from './components/Layout.js';
 import HomePage from './pages/HomePage.js';
 import CafeteriaMenuPage from './pages/CafeteriaMenuPage.js';
 import CheckoutPage from './pages/CheckoutPage.js';
+import LoginPage from './pages/LoginPage.js';
+import RegisterPage from './pages/RegisterPage.js';
+import ProtectedRoute from './components/ProtectedRoute.js';
 import { useContext } from "react";
 import { ThemeContext } from "./context/ThemeContext";
 import './App.css';
@@ -17,9 +20,17 @@ const App = () => {
         <Route element={<Layout />}>
          <Route index element={<HomePage />} />
          <Route path="cafeteria/:id" element={<CafeteriaMenuPage />} />
-         <Route path="checkout" element={<CheckoutPage />} />
+         <Route path="login" element={<LoginPage />}/>
+         <Route path="register" element={<RegisterPage />}/>
+         <Route 
+            path="checkout"
+            element={
+              <ProtectedRoute>
+                <CheckoutPage />
+              </ProtectedRoute>
+            }
+         />
        </Route>
-    
       </Routes>
     </div>
   );
