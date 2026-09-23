@@ -58,7 +58,7 @@ paths:
         - name: id
           in: path
           required: true
-          schema: { type: string, example: "u_4821" }
+          schema: { type: int, example: 1 }
         - name: locationId
           in: query
           required: true
@@ -73,13 +73,13 @@ paths:
                 type: object
                 required: [userId, locationId, orderCount, isFirstTimeUser]
                 properties:
-                  userId: { type: string, example: "u_4821" }
+                  userId: { type: integer, example: 1 }
                   locationId: { type: string, example: "cafe-1" }
                   orderCount: { type: integer, example: 7 }
                   isFirstTimeUser: { type: boolean, example: false }
                   lastOrderDate: { type: string, format: date-time, example: "2026-09-01T12:30:00Z" }
               example:
-                userId: "u_4821"
+                userId: 1
                 locationId: "cafe-1"
                 orderCount: 7
                 isFirstTimeUser: false
