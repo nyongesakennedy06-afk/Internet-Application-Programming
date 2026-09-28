@@ -518,6 +518,23 @@
   border-radius: 8px;
 }
 
+.checkout-item-qty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkout-item-qty span {
+  min-width: 20px;
+  text-align: center;
+  font-weight: 600;
+}
+
+.checkout-item-qty .btn {
+  padding: 4px 10px;
+  font-size: 0.9rem;
+}
+
 .checkout-item-details h4 {
   margin: 0;
   font-size: 1.05rem;
