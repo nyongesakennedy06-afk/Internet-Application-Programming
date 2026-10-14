@@ -76,25 +76,71 @@ router.post('/', requireAuth, async (req, res) => {
     }
 });
 
-router.get('/', requireAuth, async (req, res) => {
-    const [orders] = await pool.query(
-        'SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC', [req.user.id]
-    );
-    res.json(orders);
+// Contract: GET /orders?userId={id}&fields=timestamp|location  (Team 10)
+const toIsoDate = (value) => new Date(value).toISOString().replace(/\.\d{3}Z$/, 'Z');
+ 
+router.get('/', async (req, res) => {
+    const userId = Number(req.query.userId);
+    const { fields } = req.query;
+ 
+    if (!Number.isInteger(userId) || userId < 1) {
+        return res.status(400).json({ error: 'userId is required and must be a positive integer' });
+    }
+    if (fields !== 'timestamp' && fields !== 'location') {
+        return res.status(400).json({ error: 'fields must be one of: timestamp, location' });
+    }
+ 
+    try {
+        const [[user]] = await pool.query('SELECT id FROM users WHERE id = ?', [userId]);
+        if (!user) {
+            return res.status(404).json({ error: `User ${userId} not found` });
+        }
+ 
+        const [rows] = await pool.query(
+            'SELECT id, cafeteria_id, created_at FROM orders WHERE user_id = ? ORDER BY created_at DESC, id DESC',
+            [userId]
+        );
+ 
+        // Mapping step: DB columns -> contract fields (only the one that was asked for)
+        const orders = rows.map(row =>
+            fields === 'timestamp'
+                ? { id: row.id, timestamp: toIsoDate(row.created_at) }
+                : { id: row.id, location: row.cafeteria_id }
+        );
+ 
+        res.json({ orders });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to fetch orders' });
+    }
 });
+ 
 
+router.get('/mine', requireAuth, async (req, res) => {
+    try {
+        const [orders] = await pool.query(
+            'SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC, id DESC',
+            [req.user.id]
+        );
+        res.json(orders);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to fetch your orders' });
+    }
+});
+ 
 router.get('/:id', requireAuth, async (req, res) => {
     const [[order]] = await pool.query('SELECT * FROM orders WHERE id = ?', [req.params.id]);
-
+ 
     if (!order) {
         return res.status(401).json({ error: 'Order does not exist '});
     }
     if (order.user_id !== req.user.id) {
         return res.status(403).json({ error: 'Not authorized to view this order '});
     }
-
+ 
     const [items] = await pool.query('SELECT * FROM order_items where order_id = ?', [req.params.id]);
     res.json({ ...order, items });
 });
-
+ 
 export default router;

@@ -1,69 +1,130 @@
-openapi: 3.0.0
+openapi: 3.0.3
 info:
   title: Strathbites API
   version: 1.0.0
+
 paths:
   /orders:
-    get:
-      summary: Return a user's order history, optionally scoped to one extra field per order
-      parameters:
-        - name: userId
-          in: query
-          required: true
-          schema: { type: string, example: "u_4821" }
-        - name: fields
-          in: query
-          required: true
-          description: Which extra field to include per order
-          schema: { type: string, enum: [timestamp, location], example: timestamp }
+    post:
+      summary: Create a new order from the user's cart
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cafeteria_id, items]
+              properties:
+                cafeteria_id: { type: string, example: "cafe-2" }
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      menu_item_id: { type: string, example: "item-11" }
+                      quantity: { type: integer, example: 2 }
       responses:
-        '200':
-          description: >
-            List of the user's orders. Each includes id, plus timestamp when
-            fields=timestamp or location when fields=location.
+        '201':
+          description: Order created
           content:
             application/json:
               schema:
                 type: object
-                required: [orders]
+                properties:
+                  id: { type: integer }
+                  cafeteria_id: { type: string }
+                  status: { type: string, enum: [pending, confirmed, completed] }
+                  total_amount: { type: number }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        menu_item_id: { type: string }
+                        item_name: { type: string }
+                        item_price: { type: integer }
+                        quantity: { type: integer }
+        '400':
+          description: cafeteria_id or items missing/empty, a menu_item_id doesn't exist, or items span more than one cafeteria
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "All items must be from same cafeteria" }
+        '401':
+          description: Missing or invalid login token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "No token provided" }
+        '500':
+          description: Order could not be placed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "Failed to place order" }
+
+    get:
+      summary: Return a user's order history, with one extra field per order
+      parameters:
+        - name: userId
+          in: query
+          required: true
+          schema: { type: integer, example: 1 }
+        - name: fields
+          in: query
+          required: true
+          schema: { type: string, enum: [timestamp, location] }
+      responses:
+        '200':
+          description: List of the user's orders
+          content:
+            application/json:
+              schema:
+                type: object
                 properties:
                   orders:
                     type: array
                     items:
                       type: object
-                      required: [id]
                       properties:
-                        id: { type: string, example: "ord_10293" }
-                        timestamp: { type: string, format: date-time, example: "2026-08-13T10:00:00Z" }
-                        location: { type: string, maxLength: 50, description: "ID of the cafeteria that fulfilled the order (present only when fields=location)", example: "cafe-2" }
-              example:
-                orders:
-                  - id: "ord_10293"
-                    timestamp: "2026-08-13T10:00:00Z"
+                        id: { type: integer, example: 10293 }
+                        timestamp: { type: string, format: date-time }
+                        location: { type: string, example: "cafe-2" }
         '400':
           description: Missing userId, or fields is not one of the allowed values
           content:
             application/json:
-              schema: { type: object, required: [error], properties: { error: { type: string, example: "fields must be one of: timestamp, location" } } }
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "fields must be one of: timestamp, location" }
         '404':
           description: No user exists with the given userId
           content:
             application/json:
-              schema: { type: object, required: [error], properties: { error: { type: string, example: "User u_4821 not found" } } }
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "User 1 not found" }
 
   /users/{id}/order-frequency:
     get:
-      summary: Return how often a user has ordered at a given location, to assess whether they're a first-time or repeat customer
+      summary: Return how often a user has ordered at a given location
       parameters:
         - name: id
           in: path
           required: true
-          schema: { type: int, example: 1 }
+          schema: { type: integer, example: 1 }
         - name: locationId
           in: query
           required: true
-          description: ID of the cafeteria (primary key from the cafeterias table)
-          schema: { type: string, maxLength: 50, example: "cafe-1" }
+          schema: { type: string, example: "cafe-1" }
       responses:
         '200':
           description: Order frequency data for this user at this location
@@ -71,26 +132,25 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [userId, locationId, orderCount, isFirstTimeUser]
                 properties:
-                  userId: { type: integer, example: 1 }
-                  locationId: { type: string, example: "cafe-1" }
-                  orderCount: { type: integer, example: 7 }
-                  isFirstTimeUser: { type: boolean, example: false }
-                  lastOrderDate: { type: string, format: date-time, example: "2026-09-01T12:30:00Z" }
-              example:
-                userId: 1
-                locationId: "cafe-1"
-                orderCount: 7
-                isFirstTimeUser: false
-                lastOrderDate: "2026-09-01T12:30:00Z"
+                  userId: { type: integer }
+                  locationId: { type: string }
+                  orderCount: { type: integer }
+                  isFirstTimeUser: { type: boolean }
+                  lastOrderDate: { type: string, format: date-time }
         '400':
           description: Missing locationId
           content:
             application/json:
-              schema: { type: object, required: [error], properties: { error: { type: string, example: "locationId is required" } } }
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "locationId is required" }
         '404':
           description: No user or location found
           content:
             application/json:
-              schema: { type: object, required: [error], properties: { error: { type: string, example: "User u_4821 not found" } } }
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "User 1 not found" }
