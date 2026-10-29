@@ -32,6 +32,7 @@ CREATE TABLE users (
   email VARCHAR(255) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
   role ENUM('user', 'admin') NOT NULL DEFAULT 'user',
+  pesa_user_id VARCHAR(50) NULL,  -- links this user to their Pesa Tracker account (NULL = not linked)
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

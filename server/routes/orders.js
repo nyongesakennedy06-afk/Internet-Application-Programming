@@ -101,7 +101,8 @@ router.post('/', requireAuth, async (req, res) => {
             };
         });
 
-        
+        // Budget check (Pesa Tracker). Only for users linked to a Pesa Tracker account (users.pesa_user_id).
+        let pesaUserId = null;
         if (pesaTracker.isEnabled()) {
             const [[account]] = await connection.query('SELECT pesa_user_id FROM users WHERE id = ?', [req.user.id]);
             pesaUserId = account?.pesa_user_id ?? null;
