@@ -21,6 +21,7 @@ async function call(method, path, body) {
             headers: {
                 'Content-Type': 'application/json',
                 Authorization: `Bearer ${process.env.PESA_TRACKER_TOKEN || 'test'}`,
+                'X-API-Key': process.env.PESA_TRACKER_API_KEY || '',
             },
             body: body === undefined ? undefined : JSON.stringify(body),
             signal: AbortSignal.timeout(TIMEOUT_MS),
