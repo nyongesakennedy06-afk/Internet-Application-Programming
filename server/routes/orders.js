@@ -108,12 +108,21 @@ router.post('/', requireAuth, async (req, res) => {
             pesaUserId = account?.pesa_user_id ?? null;
         }
         if (pesaUserId) {
-            const budget = await pesaTracker.getBudget(pesaUserId);
-            if (total_amount > budget.remaining) {
-                await connection.rollback();
-                return res.status(422).json({
-                    error: `Order total KES ${total_amount} is more than your remaining food budget of KES ${budget.remaining}`
-                });
+            try {
+                const budget = await pesaTracker.getBudget(pesaUserId);
+                if (total_amount > budget.remaining) {
+                    await connection.rollback();
+                    return res.status(422).json({
+                        error: `Order total KES ${total_amount} is more than your remaining food budget of KES ${budget.remaining}`
+                    });
+                }
+            } catch (budgetErr) {
+                if (budgetErr instanceof pesaTracker.PesaTrackerError && budgetErr.status === 404) {
+                    // No budget set up on Pesa Tracker — allow the order without budget enforcement.
+                    pesaUserId = null;
+                } else {
+                    throw budgetErr;
+                }
             }
         }
 
