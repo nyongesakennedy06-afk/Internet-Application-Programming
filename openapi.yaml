@@ -1,12 +1,34 @@
 openapi: 3.0.3
 info:
   title: Strathbites API
-  version: 1.0.0
+  version: 1.1.0
+
+servers:
+  - url: http://localhost:4000/api
+    description: Local development (when sharing the API, replace this with your tunnel link plus /api)
+
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Key given privately to each consuming team (for example Team 10). Required on GET /orders and GET /users/{id}/order-frequency.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: The signed-in user's login token (from POST /auth/login). Required on POST /orders.
 
 paths:
   /orders:
     post:
       summary: Create a new order from the user's cart
+      description: >
+        Requires the user's login token. If the user is linked to a Pesa Tracker account, their remaining food
+        budget is checked first and the purchase is recorded on Pesa Tracker; if that fails, the order is not placed.
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -18,11 +40,14 @@ paths:
                 cafeteria_id: { type: string, example: "cafe-2" }
                 items:
                   type: array
+                  minItems: 1
+                  description: Each menu_item_id may appear only once.
                   items:
                     type: object
+                    required: [menu_item_id]
                     properties:
                       menu_item_id: { type: string, example: "item-11" }
-                      quantity: { type: integer, example: 2 }
+                      quantity: { type: integer, minimum: 1, maximum: 100, default: 1, example: 2 }
       responses:
         '201':
           description: Order created
@@ -45,21 +70,29 @@ paths:
                         item_price: { type: integer }
                         quantity: { type: integer }
         '400':
-          description: cafeteria_id or items missing/empty, a menu_item_id doesn't exist, or items span more than one cafeteria
+          description: cafeteria_id or items missing or invalid, a menu_item_id or the cafeteria doesn't exist, items span more than one cafeteria, or the user's linked Pesa Tracker account does not exist
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  error: { type: string, example: "All items must be from same cafeteria" }
+                  error: { type: string, example: "All items must be from the same cafeteria" }
         '401':
-          description: Missing or invalid login token
+          description: Missing, invalid or expired login token
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   error: { type: string, example: "No token provided" }
+        '422':
+          description: The order total is more than the user's remaining food budget on Pesa Tracker, so the order was not placed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "Order total KES 1000 is more than your remaining food budget of KES 100" }
         '500':
           description: Order could not be placed
           content:
@@ -68,9 +101,20 @@ paths:
                 type: object
                 properties:
                   error: { type: string, example: "Failed to place order" }
+        '502':
+          description: Pesa Tracker could not be reached or returned an error, so the order was not placed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "Pesa Tracker is unavailable, so the order was not placed" }
 
     get:
       summary: Return a user's order history, with one extra field per order
+      description: Requires an API key in the X-API-Key header.
+      security:
+        - apiKeyAuth: []
       parameters:
         - name: userId
           in: query
@@ -104,6 +148,14 @@ paths:
                 type: object
                 properties:
                   error: { type: string, example: "fields must be one of: timestamp, location" }
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "API key is required" }
         '404':
           description: No user exists with the given userId
           content:
@@ -116,6 +168,9 @@ paths:
   /users/{id}/order-frequency:
     get:
       summary: Return how often a user has ordered at a given location
+      description: Requires an API key in the X-API-Key header.
+      security:
+        - apiKeyAuth: []
       parameters:
         - name: id
           in: path
@@ -146,6 +201,14 @@ paths:
                 type: object
                 properties:
                   error: { type: string, example: "locationId is required" }
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "API key is required" }
         '404':
           description: No user or location found
           content:
