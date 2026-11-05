@@ -5,6 +5,7 @@ import CafeteriaMenuPage from './pages/CafeteriaMenuPage.js';
 import CheckoutPage from './pages/CheckoutPage.js';
 import LoginPage from './pages/LoginPage.js';
 import RegisterPage from './pages/RegisterPage.js';
+import WalletPage from './pages/WalletPage.js';
 import ProtectedRoute from './components/ProtectedRoute.js';
 import { useContext } from "react";
 import { ThemeContext } from "./context/ThemeContext";
@@ -22,6 +23,14 @@ const App = () => {
          <Route path="cafeteria/:id" element={<CafeteriaMenuPage />} />
          <Route path="login" element={<LoginPage />}/>
          <Route path="register" element={<RegisterPage />}/>
+         <Route
+            path="wallet"
+            element={
+              <ProtectedRoute>
+                <WalletPage />
+              </ProtectedRoute>
+            }
+         />
          <Route 
             path="checkout"
             element={

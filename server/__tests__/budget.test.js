@@ -3,7 +3,7 @@ import { jest } from '@jest/globals';
 import request from 'supertest';
 import app from '../app.js';
 import { pool } from '../db.js';
-import { createTestUser, cleanup } from './helpers.js';
+import { createTestUser, cleanup, walletState } from './helpers.js';
 
 // Needs the column added once with:  ALTER TABLE users ADD COLUMN pesa_user_id VARCHAR(50) NULL;
 //
@@ -135,22 +135,27 @@ describe('POST /api/orders with the Pesa Tracker budget check', () => {
     it('rolls the order back when Pesa Tracker refuses the purchase after the check passed (e.g. a second order got in first)', async () => {
         mode = 'reject-transactions';
         const before = await orderCount(linked);
+        const walletBefore = await walletState(linked.id);
 
         const res = await place(linked);
 
         expect(res.status).toBe(422);
         expect(await orderCount(linked)).toBe(before);
+        // the wallet deduction happened inside the same transaction, so it was rolled back too
+        expect(await walletState(linked.id)).toEqual(walletBefore);
     });
 
-    it('returns 400 and saves nothing when the linked Pesa Tracker account does not exist', async () => {
+    // Matches commit 41c79bd ("no budget must be set to complete an order"): a linked user with no
+    // Pesa Tracker budget can still order; we just skip the budget check and don't record it there.
+    it('a linked user with no budget set on Pesa Tracker (404) can still order, and no purchase is recorded there', async () => {
         mode = 'unknown-user';
         const before = await orderCount(linked);
 
         const res = await place(linked);
 
-        expect(res.status).toBe(400);
-        expect(typeof res.body.error).toBe('string');
-        expect(await orderCount(linked)).toBe(before);
+        expect(res.status).toBe(201);
+        expect(await orderCount(linked)).toBe(before + 1);
+        expect(requests.filter((r) => r.method === 'POST')).toHaveLength(0);
     });
 
     it('returns 502 and saves nothing when Pesa Tracker has a server error', async () => {

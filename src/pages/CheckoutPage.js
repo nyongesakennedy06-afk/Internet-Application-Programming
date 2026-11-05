@@ -2,11 +2,18 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useCart } from '../context/CartContext.js';
 import { useAuth } from '../context/AuthContext.js';
+import { useLive } from '../context/LiveContext.js';
+import { API_URL, formatKES } from '../api.js';
 
 const CheckoutPage = () => {
   const { cart, cafeteriaId, removeFromCart, updateQuantity, getTotal, clearCart } = useCart();
   const { token } = useAuth();
+  const { wallet, refresh } = useLive();
   const navigate = useNavigate();
+
+  const total = getTotal();
+  const balance = wallet?.balance;
+  const shortBy = wallet ? Math.max(0, total - balance) : 0;
 
   const [placing, setPlacing] = useState(false);
   const [error, setError] = useState('');
@@ -16,7 +23,7 @@ const CheckoutPage = () => {
     setPlacing(true);
 
     try {
-      const res = await fetch('http://localhost:4000/api/orders', {
+      const res = await fetch(`${API_URL}/api/orders`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -38,6 +45,8 @@ const CheckoutPage = () => {
         throw new Error(data.error || 'Failed to place order');
       }
 
+      // The live stream normally updates the wallet already; this guarantees it even if the stream is down.
+      refresh();
       clearCart();
       navigate('/', {state: { orderPlaced: true, orderId: data.id} });
     } catch (err) {
@@ -89,12 +98,32 @@ const CheckoutPage = () => {
             ))}
           </div>
           <div className='checkout-total'>
-            <h3>Total: KES {getTotal()}</h3>
+            <h3>Total: KES {total}</h3>
           </div>
+
+          <dl className='checkout-wallet' aria-live='polite'>
+            <div>
+              <dt>Wallet balance</dt>
+              <dd>{wallet ? formatKES(balance) : 'Loading…'}</dd>
+            </div>
+            <div>
+              <dt>This order</dt>
+              <dd>−{formatKES(total)}</dd>
+            </div>
+            <div className='checkout-wallet-after'>
+              <dt>After this order</dt>
+              <dd>{!wallet ? '…' : shortBy > 0 ? 'Not enough funds' : formatKES(balance - total)}</dd>
+            </div>
+          </dl>
+          {shortBy > 0 && (
+            <p className='checkout-short'>
+              You need {formatKES(shortBy)} more to place this order. <Link to='/wallet'>Add funds to your wallet</Link>
+            </p>
+          )}
 
           <div className='checkout-actions'>
             <button className='btn btn--secondary' onClick={clearCart} disabled={placing}>Clear Cart</button>
-            <button className='btn btn--primary btn--lg' onClick={handlePlaceOrder} disabled={placing}>
+            <button className='btn btn--primary btn--lg' onClick={handlePlaceOrder} disabled={placing || shortBy > 0}>
               {placing ? 'Placing Order...' : 'Place Order'}
             </button>
           </div>

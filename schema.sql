@@ -63,3 +63,29 @@ CREATE TABLE order_items (
   CONSTRAINT order_items_ibfk_1 FOREIGN KEY (order_id) REFERENCES orders (id),
   CONSTRAINT order_items_ibfk_2 FOREIGN KEY (menu_item_id) REFERENCES menu_items (id)
 );
+
+-- Wallet (see server/migrations/001_wallet.sql for comments; keep the two in sync).
+CREATE TABLE wallets (
+  user_id INT NOT NULL,
+  balance DECIMAL(10,2) NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id),
+  CONSTRAINT wallets_balance_not_negative CHECK (balance >= 0),
+  CONSTRAINT wallets_ibfk_1 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+
+CREATE TABLE wallet_transactions (
+  id INT NOT NULL AUTO_INCREMENT,
+  user_id INT NOT NULL,
+  type ENUM('topup', 'order_payment') NOT NULL,
+  amount DECIMAL(10,2) NOT NULL,
+  balance_after DECIMAL(10,2) NOT NULL,
+  order_id INT NULL,
+  description VARCHAR(255) NULL,
+  created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  KEY user_created (user_id, created_at),
+  KEY order_id (order_id),
+  CONSTRAINT wallet_transactions_ibfk_1 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT wallet_transactions_ibfk_2 FOREIGN KEY (order_id) REFERENCES orders (id) ON DELETE SET NULL
+);

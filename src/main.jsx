@@ -6,6 +6,7 @@ import './index.css';
 import { CartProvider } from './context/CartContext.js';
 import { ThemeProvider } from './context/ThemeContext.js';
 import { AuthProvider } from './context/AuthContext.js';
+import { LiveProvider } from './context/LiveContext.js';
 
 
 createRoot(document.getElementById('root')).render(
@@ -13,9 +14,11 @@ createRoot(document.getElementById('root')).render(
     <ThemeProvider>
       <BrowserRouter>
         <AuthProvider>
-          <CartProvider>
-            <App />
-          </CartProvider>
+          <LiveProvider>
+            <CartProvider>
+              <App />
+            </CartProvider>
+          </LiveProvider>
         </AuthProvider>
       </BrowserRouter>
     </ThemeProvider>

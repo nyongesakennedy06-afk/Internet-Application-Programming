@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import CafeteriaCard from '../components/CafeteriaCard.js';
+import { API_URL } from '../api.js';
 
 const HomePage = () => {
   const [cafeterias, setCafeterias] = useState([]);
   const location = useLocation();
 
   useEffect(() => {
-    fetch('http://localhost:4000/api/cafeterias')
+    fetch(`${API_URL}/api/cafeterias`)
       .then(res => res.json())
       .then(setCafeterias);
   }, []);

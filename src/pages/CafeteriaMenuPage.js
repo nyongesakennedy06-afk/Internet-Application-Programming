@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import MenuItem from '../components/MenuItem.js';
+import { API_URL } from '../api.js';
 
 const CafeteriaMenuPage = () => {
   const { id } = useParams();
@@ -8,7 +9,7 @@ const CafeteriaMenuPage = () => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`http://localhost:4000/api/cafeterias/${id}`)
+    fetch(`${API_URL}/api/cafeterias/${id}`)
       .then((res) => res.json())
       .then((data) => {
         setCafeteria(data);

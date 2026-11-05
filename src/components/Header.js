@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { useContext } from 'react';
 import { ThemeContext } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
+import WalletChip from './WalletChip.js';
 
 const Header = () => {
   const { darkMode, toggleTheme } = useContext(ThemeContext);
@@ -16,6 +17,7 @@ const Header = () => {
           <Link to="/checkout" className="header_cartbtn">🛒 Cart</Link>
           {user ? (
             <>
+              <WalletChip />
               <span className='header_username'>Hi, {user.name}</span>
               <button onClick={logout} className='header_link'>Log Out</button>
             </>

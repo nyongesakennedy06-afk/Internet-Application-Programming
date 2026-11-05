@@ -1,8 +1,10 @@
 import express from 'express';
 import { pool } from '../db.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { requireApiKey } from '../middleware/apiKey.js';
 import * as pesaTracker from '../pesaTracker.js';
+import * as wallet from '../wallet.js';
+import { publish } from '../events.js';
 
 const router = express.Router();
 
@@ -42,49 +44,67 @@ const validateOrderBody = (body) => {
 };
 
 // Turns a Pesa Tracker failure into an answer for our own client. The order has NOT been placed.
-const sendPesaTrackerError = (res, err) => {
+const pesaTrackerErrorReply = (err) => {
     if (err.status === 422) {
-        return res.status(422).json({ error: 'Your remaining food budget is too low for this order' });
+        return [422, 'Your remaining food budget is too low for this order'];
     }
     if (err.status === 404) {
-        return res.status(400).json({ error: 'No Pesa Tracker budget was found for your linked account' });
+        return [400, 'No Pesa Tracker budget was found for your linked account'];
     }
     console.error('Pesa Tracker error:', err.status, err.code, err.message);
-    return res.status(502).json({ error: 'Pesa Tracker is unavailable, so the order was not placed' });
+    return [502, 'Pesa Tracker is unavailable, so the order was not placed'];
 };
 
 router.post('/', requireAuth, async (req, res) => {
+    // Every backend step is written down here and sent to the user's open tabs, so the
+    // website can show exactly what the server and database did with this order.
+    const trace = [];
+    const userId = req.user.id;
+
+    // Ends the request without placing anything, and tells the live feed why.
+    const reject = (status, error) => {
+        publish(userId, 'order.rejected', { status, error }, trace);
+        return res.status(status).json({ error });
+    };
+
     const validationError = validateOrderBody(req.body);
     if (validationError) {
-        return res.status(400).json({ error: validationError });
+        trace.push(`Validation failed: ${validationError}`);
+        return reject(400, validationError);
     }
 
     const { cafeteria_id, items } = req.body;
     let connection;
 
     try {
+        await wallet.ensureWallet(pool, userId); // outside the transaction on purpose, see wallet.js
         connection = await pool.getConnection();
         await connection.beginTransaction();
+        trace.push('BEGIN transaction');
+
+        const fail = async (status, error) => {
+            await connection.rollback();
+            trace.push(`ROLLBACK: ${error}`);
+            return reject(status, error);
+        };
 
         const [[cafeteria]] = await connection.query('SELECT id FROM cafeterias WHERE id = ?', [cafeteria_id]);
         if (!cafeteria) {
-            await connection.rollback();
-            return res.status(400).json({ error: `cafeteria_id ${cafeteria_id} does not exist` });
+            return fail(400, `cafeteria_id ${cafeteria_id} does not exist`);
         }
+        trace.push(`SELECT cafeterias: found ${cafeteria_id}`);
 
         const menuItemIds = items.map(item => item.menu_item_id);
         const placeholders = menuItemIds.map(() => '?').join(',');
         const [menuItems] = await connection.query(`SELECT id, name, price, cafeteria_id FROM menu_items WHERE id IN (${placeholders})`, menuItemIds);
 
         if (menuItems.length !== menuItemIds.length) {
-            await connection.rollback();
-            return res.status(400).json({ error: 'One or more menu items do not exist' });
+            return fail(400, 'One or more menu items do not exist');
         }
 
         const wrongCafeteria = menuItems.some(mi => mi.cafeteria_id !== cafeteria_id);
         if (wrongCafeteria) {
-            await connection.rollback();
-            return res.status(400).json({ error: 'All items must be from the same cafeteria' });
+            return fail(400, 'All items must be from the same cafeteria');
         }
 
         // Mapping step: request items + DB menu rows -> order lines (price and name come from the DB)
@@ -100,25 +120,33 @@ router.post('/', requireAuth, async (req, res) => {
                 quantity
             };
         });
+        trace.push(`SELECT menu_items: ${menuItems.length} item(s), total KES ${total_amount} (prices from DB)`);
+
+        // Wallet check. FOR UPDATE locks this user's wallet row until COMMIT/ROLLBACK, so two orders
+        // placed at the same moment can't both spend the same shillings.
+        const walletBalance = await wallet.lockBalance(connection, userId);
+        trace.push(`SELECT wallets FOR UPDATE: balance KES ${walletBalance}`);
+        if (total_amount > walletBalance) {
+            return fail(422, new wallet.InsufficientFundsError(walletBalance, total_amount).message);
+        }
 
         // Budget check (Pesa Tracker). Only for users linked to a Pesa Tracker account (users.pesa_user_id).
         let pesaUserId = null;
         if (pesaTracker.isEnabled()) {
-            const [[account]] = await connection.query('SELECT pesa_user_id FROM users WHERE id = ?', [req.user.id]);
+            const [[account]] = await connection.query('SELECT pesa_user_id FROM users WHERE id = ?', [userId]);
             pesaUserId = account?.pesa_user_id ?? null;
         }
         if (pesaUserId) {
             try {
                 const budget = await pesaTracker.getBudget(pesaUserId);
+                trace.push(`Pesa Tracker GET budget: KES ${budget.remaining} remaining`);
                 if (total_amount > budget.remaining) {
-                    await connection.rollback();
-                    return res.status(422).json({
-                        error: `Order total KES ${total_amount} is more than your remaining food budget of KES ${budget.remaining}`
-                    });
+                    return fail(422, `Order total KES ${total_amount} is more than your remaining food budget of KES ${budget.remaining}`);
                 }
             } catch (budgetErr) {
                 if (budgetErr instanceof pesaTracker.PesaTrackerError && budgetErr.status === 404) {
                     // No budget set up on Pesa Tracker — allow the order without budget enforcement.
+                    trace.push('Pesa Tracker GET budget: no budget set, skipping budget check');
                     pesaUserId = null;
                 } else {
                     throw budgetErr;
@@ -128,10 +156,11 @@ router.post('/', requireAuth, async (req, res) => {
 
         const [orderResult] = await connection.query(
             'INSERT INTO orders (user_id, cafeteria_id, status, total_amount) VALUES (?, ?, ?, ?)',
-            [req.user.id, cafeteria_id, 'pending', total_amount]
+            [userId, cafeteria_id, 'pending', total_amount]
         );
 
         const orderId = orderResult.insertId;
+        trace.push(`INSERT orders: #${orderId} (pending, KES ${total_amount})`);
 
         for (const item of orderItemsToInsert) {
             await connection.query(
@@ -139,6 +168,16 @@ router.post('/', requireAuth, async (req, res) => {
                 [orderId, item.menu_item_id, item.item_name, item.item_price, item.quantity]
             );
         }
+        trace.push(`INSERT order_items: ${orderItemsToInsert.length} row(s)`);
+
+        const payment = await wallet.applyEntry(connection, userId, {
+            type: 'order_payment',
+            amount: -total_amount,
+            orderId,
+            description: `Order #${orderId}`,
+        });
+        trace.push(`UPDATE wallets: KES ${payment.balanceBefore} to KES ${payment.balanceAfter}`);
+        trace.push(`INSERT wallet_transactions: #${payment.transaction.id} (order_payment -${total_amount})`);
 
         // Record the purchase on Pesa Tracker BEFORE committing: it deducts the budget itself, and if it
         // refuses (or is down) the throw below rolls our order back, so nothing is left half-done.
@@ -149,24 +188,37 @@ router.post('/', requireAuth, async (req, res) => {
                 amount: total_amount,
                 items: orderItemsToInsert.map(i => (i.quantity > 1 ? `${i.item_name} x${i.quantity}` : i.item_name))
             });
+            trace.push('Pesa Tracker POST transaction: recorded');
         }
 
         await connection.commit();
+        trace.push('COMMIT');
 
-        res.status(201).json({
+        const order = {
             id: orderId,
             cafeteria_id,
             status: 'pending',
             total_amount,
             items: orderItemsToInsert
-        });
+        };
+
+        // Only now, after COMMIT, tell the browser: what it shows is guaranteed to be in the DB.
+        publish(userId, 'wallet.updated', { balance: payment.balanceAfter, transaction: payment.transaction }, []);
+        publish(userId, 'order.created', { order: { ...order, created_at: new Date().toISOString() } }, trace);
+
+        res.status(201).json(order);
     } catch (err) {
-        if (connection) await connection.rollback();
+        if (connection) {
+            await connection.rollback();
+        }
         if (err instanceof pesaTracker.PesaTrackerError) {
-            return sendPesaTrackerError(res, err);
+            const [status, error] = pesaTrackerErrorReply(err);
+            trace.push(`Pesa Tracker refused or failed (${err.status ?? err.code})`, `ROLLBACK: ${error}`);
+            return reject(status, error);
         }
         console.error(err);
-        res.status(500).json({ error: 'Failed to place order' });
+        trace.push('ROLLBACK: unexpected server error');
+        return reject(500, 'Failed to place order');
     } finally {
         if (connection) connection.release();
     }
@@ -212,18 +264,54 @@ router.get('/', requireApiKey, async (req, res) => {
     }
 });
 
-// Not part of the Team 10 contract: the logged-in user's own orders (full rows),
-// for a future order history page. Must stay above '/:id' so "mine" isn't read as an id.
+// Not part of the Team 10 contract: the logged-in user's own orders with their line items,
+// for the wallet / order history page. Must stay above '/:id' so "mine" isn't read as an id.
 router.get('/mine', requireAuth, async (req, res) => {
     try {
         const [orders] = await pool.query(
-            'SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC, id DESC',
+            `SELECT o.*, c.name AS cafeteria_name
+               FROM orders o JOIN cafeterias c ON c.id = o.cafeteria_id
+              WHERE o.user_id = ? ORDER BY o.created_at DESC, o.id DESC LIMIT 50`,
             [req.user.id]
         );
-        res.json(orders);
+        const ids = orders.map((o) => o.id);
+        const [items] = ids.length
+            ? await pool.query('SELECT order_id, menu_item_id, item_name, item_price, quantity FROM order_items WHERE order_id IN (?)', [ids])
+            : [[]];
+
+        res.json(orders.map((o) => ({
+            ...o,
+            total_amount: Number(o.total_amount),
+            items: items.filter((i) => i.order_id === o.id),
+        })));
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Failed to fetch your orders' });
+    }
+});
+
+// Admin: move an order along (pending -> confirmed -> completed). The customer's open tabs update live.
+const STATUSES = ['pending', 'confirmed', 'completed'];
+
+router.patch('/:id/status', requireAuth, requireAdmin, async (req, res) => {
+    const { status } = req.body ?? {};
+    if (!STATUSES.includes(status)) {
+        return res.status(400).json({ error: `status must be one of: ${STATUSES.join(', ')}` });
+    }
+    try {
+        const [[order]] = await pool.query('SELECT id, user_id, status FROM orders WHERE id = ?', [req.params.id]);
+        if (!order) {
+            return res.status(404).json({ error: 'Order does not exist' });
+        }
+        await pool.query('UPDATE orders SET status = ? WHERE id = ?', [status, order.id]);
+
+        publish(order.user_id, 'order.updated', { id: order.id, status, previous: order.status }, [
+            `UPDATE orders: #${order.id} status ${order.status} to ${status}`,
+        ]);
+        res.json({ id: order.id, status });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to update order status' });
     }
 });
 
