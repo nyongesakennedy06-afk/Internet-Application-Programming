@@ -1,22 +1,26 @@
 import request from 'supertest';
 import app from '../app.js';
 import { pool } from '../db.js';
-import { createTestUser, cleanup, walletState } from './helpers.js';
-import { MAX_TOPUP } from '../routes/wallet.js';
+import { createTestUser, insertOrder, cleanup } from './helpers.js';
+import { startFakePesa, deadPesaUrl } from './fakePesa.js';
 
-// Needs the wallet tables:  mysql -u root -p strathsbites < server/migrations/001_wallet.sql
+// Needs the schema from schema.sql (users.pesa_user_id and orders.pesa_transaction_id).
+// Pesa Tracker is replaced by a stand-in server (fakePesa.js); the real one is never contacted.
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 let server;
 let baseUrl;
-let price11; // price of item-11 (cafe-2), read from the DB so the tests follow the seed data
+let fake;
+let price11;    // price of item-11 (cafe-2), read from the DB so the tests follow the seed data
 
 const ORDER_ONE = { cafeteria_id: 'cafe-2', items: [{ menu_item_id: 'item-11' }] };
 
 const placeOrder = (user, body = ORDER_ONE) =>
     request(app).post('/api/orders').set('Authorization', `Bearer ${user.token}`).send(body);
-const topUp = (user, amount) =>
-    request(app).post('/api/wallet/topup').set('Authorization', `Bearer ${user.token}`).send({ amount });
 const getWallet = (user) => request(app).get('/api/wallet').set('Authorization', `Bearer ${user.token}`);
+const linkedUser = (label) => createTestUser(label, { pesaUserId: 'usr_test' });
+const keysOf = (obj) => Object.keys(obj).sort();
 
 // Opens GET /api/events the same way the website does (fetch + Authorization header) and
 // collects every event. waitFor(type) resolves with the first event of that type.
@@ -67,11 +71,19 @@ async function openStream(user) {
 beforeAll(async () => {
     server = app.listen(0);
     baseUrl = `http://127.0.0.1:${server.address().port}`;
+    fake = await startFakePesa();
     const [[row]] = await pool.query("SELECT price FROM menu_items WHERE id = 'item-11'");
     price11 = row.price;
 });
 
+beforeEach(() => {
+    fake.reset();
+    process.env.PESA_TRACKER_URL = fake.url;
+});
+
 afterAll(async () => {
+    delete process.env.PESA_TRACKER_URL;
+    await fake.close();
     await new Promise((resolve) => server.close(resolve));
     await cleanup();
 });
@@ -83,104 +95,182 @@ describe('GET /api/wallet', () => {
         expect(res.status).toBe(401);
     });
 
-    it('a user who never had a wallet gets one created at KES 0 with an empty statement', async () => {
-        const user = await createTestUser('wallet-new', { walletBalance: null });
+    it('shows the remaining budget read from Pesa Tracker, and only reads (never writes) there', async () => {
+        const user = await linkedUser('wallet-ok');
+        fake.state.remaining = 8500;
 
         const res = await getWallet(user);
 
         expect(res.status).toBe(200);
-        expect(res.body).toMatchObject({ balance: 0, currency: 'KES', transactions: [], pesa: null });
-        expect((await walletState(user.id)).balance).toBe(0); // the row really exists now
+        expect(keysOf(res.body)).toEqual(['currency', 'remaining', 'status', 'transactions']);
+        expect(res.body).toEqual({ status: 'ok', remaining: 8500, currency: 'KES', transactions: [] });
+        expect(fake.state.requests.map((r) => `${r.method} ${r.url}`)).toEqual(['GET /v1/users/usr_test/budget']);
+    });
+
+    it('a user who is not linked to Pesa Tracker gets status not_linked, and Pesa Tracker is never contacted', async () => {
+        const user = await createTestUser('wallet-unlinked');
+
+        const res = await getWallet(user);
+
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ status: 'not_linked', remaining: null, currency: 'KES', transactions: [] });
+        expect(fake.state.requests).toHaveLength(0);
+    });
+
+    it('with the integration switched off (PESA_TRACKER_URL unset) a linked user also gets not_linked', async () => {
+        const user = await linkedUser('wallet-off');
+        delete process.env.PESA_TRACKER_URL;
+
+        const res = await getWallet(user);
+
+        expect(res.body.status).toBe('not_linked');
+        expect(res.body.remaining).toBeNull();
+    });
+
+    it('status no_budget when Pesa Tracker has no budget for the linked user', async () => {
+        const user = await linkedUser('wallet-nobudget');
+        fake.state.mode = 'unknown-user';
+
+        const res = await getWallet(user);
+
+        expect(res.status).toBe(200);
+        expect(res.body).toMatchObject({ status: 'no_budget', remaining: null });
+    });
+
+    it('status unavailable (not an error page) when Pesa Tracker has a server error', async () => {
+        const user = await linkedUser('wallet-down');
+        fake.state.mode = 'server-error';
+
+        const res = await getWallet(user);
+
+        expect(res.status).toBe(200);
+        expect(res.body).toMatchObject({ status: 'unavailable', remaining: null });
+    });
+
+    it('status unavailable when Pesa Tracker cannot be reached at all, and past transactions still show', async () => {
+        const user = await linkedUser('wallet-unreachable');
+        await insertOrder(user.id, 'cafe-2', 'completed', { pesaTransactionId: 'txn_00000042' });
+        process.env.PESA_TRACKER_URL = await deadPesaUrl();
+
+        const res = await getWallet(user);
+
+        expect(res.status).toBe(200);
+        expect(res.body).toMatchObject({ status: 'unavailable', remaining: null });
+        expect(res.body.transactions).toHaveLength(1);
     });
 });
 
 // ---------------------------------------------------------------------------
-describe('POST /api/wallet/topup', () => {
+describe('the wallet follows the user\'s orders', () => {
+    it('after an order the remaining amount drops by exactly the order total and the order is listed as a transaction', async () => {
+        const user = await linkedUser('wallet-flow');
+        fake.state.remaining = 8500;
+
+        const before = await getWallet(user);
+        expect(before.body.remaining).toBe(8500);
+        expect(before.body.transactions).toHaveLength(0);
+
+        const order = await placeOrder(user);
+        expect(order.status).toBe(201);
+
+        const after = await getWallet(user);
+        expect(after.body.status).toBe('ok');
+        expect(after.body.remaining).toBe(8500 - price11);
+
+        expect(after.body.transactions).toHaveLength(1);
+        const [tx] = after.body.transactions;
+        expect(keysOf(tx)).toEqual(['amount', 'created_at', 'description', 'id', 'items', 'status']);
+        expect(tx.id).toBe(order.body.id);
+        expect(tx.description).toMatch(new RegExp(`^Order #${order.body.id} at .+`));
+        expect(tx.items).toEqual([order.body.items[0].item_name]);
+        expect(tx.amount).toBe(price11);
+        expect(tx.status).toBe('pending');
+        expect(tx.created_at).toMatch(ISO_DATE);
+    });
+
+    it('an order with quantity 2 reads "name x2" and costs twice the price', async () => {
+        const user = await linkedUser('wallet-qty');
+        fake.state.remaining = 8500;
+
+        const order = await placeOrder(user, { cafeteria_id: 'cafe-2', items: [{ menu_item_id: 'item-11', quantity: 2 }] });
+        const res = await getWallet(user);
+
+        expect(res.body.remaining).toBe(8500 - price11 * 2);
+        expect(res.body.transactions[0].items).toEqual([`${order.body.items[0].item_name} x2`]);
+        expect(res.body.transactions[0].amount).toBe(price11 * 2);
+    });
+
+    it('only purchases Pesa Tracker accepted are transactions (an order that was never recorded there is not)', async () => {
+        const user = await linkedUser('wallet-recorded');
+        const recorded = await insertOrder(user.id, 'cafe-1', 'completed', { pesaTransactionId: 'txn_00000007' });
+        await insertOrder(user.id, 'cafe-1', 'completed'); // no pesa_transaction_id
+
+        const res = await getWallet(user);
+
+        expect(res.body.transactions.map((t) => t.id)).toEqual([recorded]);
+    });
+
+    it('transactions are newest first', async () => {
+        const user = await linkedUser('wallet-order');
+        const first = await insertOrder(user.id, 'cafe-1', 'completed', { pesaTransactionId: 'txn_00000011' });
+        const second = await insertOrder(user.id, 'cafe-1', 'completed', { pesaTransactionId: 'txn_00000012' });
+        const third = await insertOrder(user.id, 'cafe-2', 'completed', { pesaTransactionId: 'txn_00000013' });
+
+        const res = await getWallet(user);
+
+        expect(res.body.transactions.map((t) => t.id)).toEqual([third, second, first]);
+    });
+
+    it('you only ever see your own transactions', async () => {
+        const alice = await linkedUser('wallet-alice');
+        const bob = await linkedUser('wallet-bob');
+        const bobsOrder = await insertOrder(bob.id, 'cafe-1', 'completed', { pesaTransactionId: 'txn_00000021' });
+
+        const res = await getWallet(alice);
+
+        expect(res.body.transactions).toEqual([]);
+        expect(JSON.stringify(res.body)).not.toContain(`#${bobsOrder} `);
+    });
+
+    it('an order refused for being over budget is not a transaction and the remaining amount does not move', async () => {
+        const user = await linkedUser('wallet-refused');
+        fake.state.remaining = price11 - 1;
+
+        const order = await placeOrder(user);
+        const res = await getWallet(user);
+
+        expect(order.status).toBe(422);
+        expect(res.body.remaining).toBe(price11 - 1);
+        expect(res.body.transactions).toEqual([]);
+    });
+});
+
+// ---------------------------------------------------------------------------
+describe('no manual input: the wallet cannot be changed from our side', () => {
     it.each([
-        ['amount is missing', undefined],
-        ['amount is a string', '500'],
-        ['amount is zero', 0],
-        ['amount is negative', -100],
-        ['amount has cents', 10.5],
-        ['amount is above the maximum', MAX_TOPUP + 1],
-    ])('400 and nothing changes when %s', async (_label, amount) => {
-        const user = await createTestUser('topup-bad', { walletBalance: 200 });
+        ['POST', '/api/wallet/topup'],
+        ['POST', '/api/wallet'],
+        ['PUT', '/api/wallet'],
+        ['PATCH', '/api/wallet'],
+        ['DELETE', '/api/wallet'],
+    ])('%s %s does not exist', async (method, path) => {
+        const user = await linkedUser('wallet-nowrite');
+        const before = fake.state.remaining;
 
-        const res = await topUp(user, amount);
+        const res = await request(app)[method.toLowerCase()](path).set('Authorization', `Bearer ${user.token}`).send({ amount: 5000, remaining: 99999 });
 
-        expect(res.status).toBe(400);
-        expect(await walletState(user.id)).toEqual({ balance: 200, ledgerRows: 0 });
+        expect(res.status).toBe(404);
+        expect(fake.state.remaining).toBe(before);
+        expect(fake.state.requests.filter((r) => r.method !== 'GET')).toHaveLength(0);
     });
 
-    it('adds the money and writes one ledger row with the right balance_after', async () => {
-        const user = await createTestUser('topup-ok', { walletBalance: 200 });
+    it('the remaining amount cannot be set from the URL either: it always comes from Pesa Tracker', async () => {
+        const user = await linkedUser('wallet-query');
+        fake.state.remaining = 8500;
 
-        const res = await topUp(user, 500);
+        const res = await request(app).get('/api/wallet?remaining=999999&balance=999999').set('Authorization', `Bearer ${user.token}`);
 
-        expect(res.status).toBe(201);
-        expect(res.body.balance).toBe(700);
-        expect(res.body.transaction).toMatchObject({ type: 'topup', amount: 500, balance_after: 700, order_id: null });
-        expect(await walletState(user.id)).toEqual({ balance: 700, ledgerRows: 1 });
-    });
-});
-
-// ---------------------------------------------------------------------------
-describe('paying for orders from the wallet', () => {
-    it('deducts exactly the order total and links the ledger row to the order', async () => {
-        const user = await createTestUser('pay-ok', { walletBalance: price11 + 1000 });
-
-        const res = await placeOrder(user);
-
-        expect(res.status).toBe(201);
-        const wallet = await getWallet(user);
-        expect(wallet.body.balance).toBe(1000);
-        expect(wallet.body.transactions).toHaveLength(1);
-        expect(wallet.body.transactions[0]).toMatchObject({
-            type: 'order_payment', amount: -price11, balance_after: 1000, order_id: res.body.id,
-        });
-    });
-
-    it('edge case: a balance exactly equal to the total is enough, and leaves KES 0', async () => {
-        const user = await createTestUser('pay-exact', { walletBalance: price11 });
-
-        const res = await placeOrder(user);
-
-        expect(res.status).toBe(201);
-        expect((await walletState(user.id)).balance).toBe(0);
-    });
-
-    it('422 when the wallet is short: no order, no deduction, no ledger row', async () => {
-        const user = await createTestUser('pay-short', { walletBalance: price11 - 1 });
-
-        const res = await placeOrder(user);
-
-        expect(res.status).toBe(422);
-        expect(res.body.error).toMatch(/top up/i);
-        const [[{ n }]] = await pool.query('SELECT COUNT(*) AS n FROM orders WHERE user_id = ?', [user.id]);
-        expect(n).toBe(0);
-        expect(await walletState(user.id)).toEqual({ balance: price11 - 1, ledgerRows: 0 });
-    });
-
-    it('two orders at the same instant with money for only one: exactly one succeeds, balance never negative', async () => {
-        const user = await createTestUser('pay-race', { walletBalance: price11 });
-
-        const results = await Promise.all([placeOrder(user), placeOrder(user), placeOrder(user)]);
-
-        expect(results.map((r) => r.status).sort()).toEqual([201, 422, 422]);
-        expect(await walletState(user.id)).toEqual({ balance: 0, ledgerRows: 1 });
-    });
-
-    it('the ledger always adds up: starting balance + sum of ledger amounts = current balance', async () => {
-        const user = await createTestUser('pay-sum', { walletBalance: 0 });
-        await topUp(user, 1000);
-        await placeOrder(user);
-        await topUp(user, 250);
-        await placeOrder(user);
-
-        const [[{ total }]] = await pool.query('SELECT SUM(amount) AS total FROM wallet_transactions WHERE user_id = ?', [user.id]);
-        const { balance } = await walletState(user.id);
-        expect(Number(total)).toBe(balance);
-        expect(balance).toBe(1250 - 2 * price11);
+        expect(res.body.remaining).toBe(8500);
     });
 });
 
@@ -207,48 +297,56 @@ describe('live updates: GET /api/events', () => {
         expect(res.status).toBe(401);
     });
 
-    it('a placed order pushes wallet.updated (the committed balance) and order.created with the DB trace', async () => {
-        const user = await createTestUser('live-order', { walletBalance: price11 + 50 });
+    it('a purchase recorded on Pesa Tracker pushes wallet.updated, only after the order is saved', async () => {
+        const user = await linkedUser('live-order');
         const stream = await openStream(user);
         try {
             const res = await placeOrder(user);
             expect(res.status).toBe(201);
 
-            const walletEvent = await stream.waitFor('wallet.updated');
-            expect(walletEvent.data.balance).toBe(50);
-            expect(walletEvent.data.balance).toBe((await walletState(user.id)).balance); // UI value == DB value
-
-            const orderEvent = await stream.waitFor('order.created');
-            expect(orderEvent.data.order.id).toBe(res.body.id);
-            expect(orderEvent.trace[0]).toBe('BEGIN transaction');
-            expect(orderEvent.trace.at(-1)).toBe('COMMIT');
+            const event = await stream.waitFor('wallet.updated');
+            expect(event.data).toEqual({ orderId: res.body.id });
+            const [[row]] = await pool.query('SELECT COUNT(*) AS n FROM orders WHERE id = ?', [res.body.id]);
+            expect(row.n).toBe(1); // by the time the page hears about it, the order is committed
         } finally {
             stream.close();
         }
     });
 
-    it('a refused order pushes order.rejected ending in ROLLBACK, and no wallet.updated', async () => {
-        const user = await createTestUser('live-reject', { walletBalance: 1 });
+    it('an order that was not recorded on Pesa Tracker (user not linked) pushes nothing', async () => {
+        const user = await createTestUser('live-unlinked');
+        const stream = await openStream(user);
+        try {
+            const res = await placeOrder(user);
+            expect(res.status).toBe(201);
+            await new Promise((r) => setTimeout(r, 150));
+            expect(stream.events.map((e) => e.type)).toEqual(['stream.ready']);
+        } finally {
+            stream.close();
+        }
+    });
+
+    it('a refused order pushes nothing', async () => {
+        const user = await linkedUser('live-reject');
+        fake.state.remaining = 1;
         const stream = await openStream(user);
         try {
             const res = await placeOrder(user);
             expect(res.status).toBe(422);
-
-            const event = await stream.waitFor('order.rejected');
-            expect(event.data).toEqual({ status: 422, error: res.body.error });
-            expect(event.trace.at(-1)).toMatch(/^ROLLBACK/);
-            expect(stream.events.some((e) => e.type === 'wallet.updated')).toBe(false);
+            await new Promise((r) => setTimeout(r, 150));
+            expect(stream.events.map((e) => e.type)).toEqual(['stream.ready']);
         } finally {
             stream.close();
         }
     });
 
     it('events are private: another user\'s stream sees nothing', async () => {
-        const alice = await createTestUser('live-alice');
-        const bob = await createTestUser('live-bob');
+        const alice = await linkedUser('live-alice');
+        const bob = await linkedUser('live-bob');
         const bobStream = await openStream(bob);
         try {
-            await topUp(alice, 100);
+            const res = await placeOrder(alice);
+            expect(res.status).toBe(201);
             await new Promise((r) => setTimeout(r, 150));
             expect(bobStream.events.map((e) => e.type)).toEqual(['stream.ready']);
         } finally {

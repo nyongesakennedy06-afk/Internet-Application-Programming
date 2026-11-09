@@ -25,8 +25,9 @@ paths:
     post:
       summary: Create a new order from the user's cart
       description: >
-        Requires the user's login token. If the user is linked to a Pesa Tracker account, their remaining food
-        budget is checked first and the purchase is recorded on Pesa Tracker; if that fails, the order is not placed.
+        Requires the user's login token. If the user is linked to a Pesa Tracker account that has a budget, their
+        remaining food budget is checked first and the purchase is recorded on Pesa Tracker; if that fails, the order
+        is not placed. A linked user with no budget set on Pesa Tracker can still order, without budget enforcement.
       security:
         - bearerAuth: []
       requestBody:
@@ -70,7 +71,7 @@ paths:
                         item_price: { type: integer }
                         quantity: { type: integer }
         '400':
-          description: cafeteria_id or items missing or invalid, a menu_item_id or the cafeteria doesn't exist, items span more than one cafeteria, or the user's linked Pesa Tracker account does not exist
+          description: cafeteria_id or items missing or invalid, a menu_item_id or the cafeteria doesn't exist, or items span more than one cafeteria
           content:
             application/json:
               schema:

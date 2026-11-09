@@ -2,19 +2,20 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { useAuth } from './AuthContext.js';
 import { apiFetch, streamEvents } from '../api.js';
 
-// Keeps the logged-in user's wallet, orders and a feed of backend activity in sync with the server.
+// Keeps the logged-in user's wallet (remaining food budget + transactions) in sync with the server.
 //
-// How it stays correct:
-//  1. On connect (and every reconnect, and whenever the tab becomes visible again) it reloads
-//     GET /api/wallet and GET /api/orders/mine. That is the database's current state, full stop.
-//  2. In between, the server pushes events over GET /api/events, but only AFTER each DB COMMIT,
-//     so applying them can never show something the database rolled back.
-//  3. Wallet updates are applied only if they're newer than what's on screen (ledger ids only grow
-//     per user), so a late HTTP response can't overwrite a newer pushed balance.
+// The wallet is read-only. It always comes from GET /api/wallet, which reads the budget live from
+// Pesa Tracker. It is reloaded:
+//   - as soon as the user is logged in, and again when the live connection opens (and every reconnect),
+//   - when the tab becomes visible again,
+//   - when the server says 'wallet.updated' (a purchase was recorded) or 'order.updated' (a status
+//     changed). The server only sends these AFTER the database commit,
+//   - after you place an order (CheckoutPage calls refresh()).
+// Every reload gets a number and only the most recently STARTED one may apply its result, so a slow
+// response can never overwrite a newer one.
 
 const LiveContext = createContext(null);
 
-const MAX_ACTIVITY = 30;
 const MAX_RETRY_MS = 15000;
 
 const sleep = (ms, signal) =>
@@ -26,100 +27,60 @@ const sleep = (ms, signal) =>
 const LiveProvider = ({ children }) => {
     const { token } = useAuth();
 
-    const [wallet, setWallet] = useState(null);       // { balance, currency, transactions, pesa }
-    const [orders, setOrders] = useState([]);
-    const [activity, setActivity] = useState([]);     // newest first
+    const [wallet, setWallet] = useState(null);       // { status, remaining, currency, transactions }
     const [connection, setConnection] = useState('offline'); // 'connecting' | 'live' | 'reconnecting' | 'offline'
-    const [lastChange, setLastChange] = useState(null); // { amount, id } of the newest wallet movement, for the flash
+    const [flashKey, setFlashKey] = useState(0);       // goes up whenever the remaining amount changes, to replay the highlight
     const [loadError, setLoadError] = useState('');
 
     const tokenRef = useRef(token);
     tokenRef.current = token;
 
-    // Orders: every fetch gets a number and only the most recently STARTED one may apply its result.
-    // An order event triggers a new fetch, which reads the DB after that event's COMMIT, so the
-    // latest-started fetch is always at least as fresh as anything we've been told about.
-    const ordersSeq = useRef(0);
-    const loadOrders = useCallback(async () => {
-        const t = tokenRef.current;
-        if (!t) return;
-        const seq = ++ordersSeq.current;
-        const result = await apiFetch('/api/orders/mine', { token: t });
-        if (seq === ordersSeq.current && tokenRef.current === t) setOrders(result);
-    }, []);
+    const walletSeq = useRef(0);
+    const lastRemaining = useRef(null);
 
-    // Wallet snapshots from GET /api/wallet: never replace a newer state already on screen
-    // (an event can arrive while the snapshot request is in flight). Ledger ids only grow per user.
-    const applyWalletSnapshot = useCallback((snapshot) => {
-        setWallet((current) => {
-            const newestOnScreen = current?.transactions[0]?.id ?? 0;
-            const newestInSnapshot = snapshot.transactions[0]?.id ?? 0;
-            if (current && newestOnScreen > newestInSnapshot) {
-                return { ...snapshot, balance: current.balance, transactions: current.transactions };
-            }
-            return snapshot;
-        });
-    }, []);
-
-    // Reload everything from the database.
+    // Reload the wallet from the server.
     const refresh = useCallback(async () => {
         const t = tokenRef.current;
         if (!t) return;
+        const seq = ++walletSeq.current;
         try {
-            const [w] = await Promise.all([apiFetch('/api/wallet', { token: t }), loadOrders()]);
-            if (tokenRef.current !== t) return; // logged out meanwhile
-            applyWalletSnapshot(w);
+            const result = await apiFetch('/api/wallet', { token: t });
+            if (seq !== walletSeq.current || tokenRef.current !== t) return; // a newer reload started, or logged out
+            const previous = lastRemaining.current;
+            lastRemaining.current = result.remaining;
+            if (previous != null && result.remaining != null && result.remaining !== previous) {
+                setFlashKey((k) => k + 1);
+            }
+            setWallet(result);
             setLoadError('');
         } catch (err) {
-            setLoadError(err.message);
+            if (seq === walletSeq.current && tokenRef.current === t) setLoadError(err.message);
         }
-    }, [loadOrders, applyWalletSnapshot]);
-
-    // Applies a committed wallet change (from a pushed event or an HTTP response; whichever lands first).
-    const applyWalletUpdate = useCallback(({ balance, transaction }) => {
-        setWallet((current) => {
-            if (!current) return current; // refresh() will load it
-            const newest = current.transactions[0]?.id ?? 0;
-            if (current.transactions.some((t) => t.id === transaction.id)) return current; // already shown
-            if (transaction.id < newest) {
-                // Older than what's on screen: keep it in the statement, but don't roll the balance back.
-                const transactions = [...current.transactions, transaction].sort((a, b) => b.id - a.id);
-                return { ...current, transactions };
-            }
-            return { ...current, balance, transactions: [transaction, ...current.transactions].slice(0, 50) };
-        });
-        setLastChange({ amount: transaction.amount, id: transaction.id });
     }, []);
 
     useEffect(() => {
         if (!token) {
+            walletSeq.current += 1; // ignore any reload still in flight
+            lastRemaining.current = null;
             setWallet(null);
-            setOrders([]);
-            setActivity([]);
             setConnection('offline');
-            setLastChange(null);
+            setFlashKey(0);
+            setLoadError('');
             return;
         }
 
         const controller = new AbortController();
         const { signal } = controller;
 
+        // Load right away, so the wallet shows even if the live connection is slow or blocked.
+        refresh();
+
         const handleEvent = (event) => {
             if (event.type === 'stream.ready') {
                 setConnection('live');
                 refresh();
-                return;
-            }
-            setActivity((prev) => [event, ...prev].slice(0, MAX_ACTIVITY));
-
-            if (event.type === 'wallet.updated') {
-                applyWalletUpdate(event.data);
-            } else if (event.type === 'order.created') {
-                loadOrders().catch(() => {});
-            } else if (event.type === 'order.updated') {
-                // Show it instantly, then confirm from the DB (also covers an order we haven't loaded yet).
-                setOrders((prev) => prev.map((o) => (o.id === event.data.id ? { ...o, status: event.data.status } : o)));
-                loadOrders().catch(() => {});
+            } else if (event.type === 'wallet.updated' || event.type === 'order.updated') {
+                refresh();
             }
         };
 
@@ -143,7 +104,7 @@ const LiveProvider = ({ children }) => {
             }
         })();
 
-        // Coming back to the tab after a while: resync in case the stream was paused by the browser.
+        // Coming back to the tab after a while: reload in case the stream was paused by the browser.
         const onVisible = () => { if (document.visibilityState === 'visible') refresh(); };
         document.addEventListener('visibilitychange', onVisible);
 
@@ -151,16 +112,10 @@ const LiveProvider = ({ children }) => {
             controller.abort();
             document.removeEventListener('visibilitychange', onVisible);
         };
-    }, [token, refresh, loadOrders, applyWalletUpdate]);
-
-    const topUp = useCallback(async (amount) => {
-        const result = await apiFetch('/api/wallet/topup', { token: tokenRef.current, method: 'POST', body: { amount } });
-        applyWalletUpdate(result);
-        return result;
-    }, [applyWalletUpdate]);
+    }, [token, refresh]);
 
     return (
-        <LiveContext.Provider value={{ wallet, orders, activity, connection, lastChange, loadError, refresh, topUp }}>
+        <LiveContext.Provider value={{ wallet, connection, flashKey, loadError, refresh }}>
             {children}
         </LiveContext.Provider>
     );

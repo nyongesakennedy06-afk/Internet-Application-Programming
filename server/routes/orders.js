@@ -3,7 +3,6 @@ import { pool } from '../db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { requireApiKey } from '../middleware/apiKey.js';
 import * as pesaTracker from '../pesaTracker.js';
-import * as wallet from '../wallet.js';
 import { publish } from '../events.js';
 
 const router = express.Router();
@@ -56,43 +55,29 @@ const pesaTrackerErrorReply = (err) => {
 };
 
 router.post('/', requireAuth, async (req, res) => {
-    // Every backend step is written down here and sent to the user's open tabs, so the
-    // website can show exactly what the server and database did with this order.
-    const trace = [];
-    const userId = req.user.id;
-
-    // Ends the request without placing anything, and tells the live feed why.
-    const reject = (status, error) => {
-        publish(userId, 'order.rejected', { status, error }, trace);
-        return res.status(status).json({ error });
-    };
-
     const validationError = validateOrderBody(req.body);
     if (validationError) {
-        trace.push(`Validation failed: ${validationError}`);
-        return reject(400, validationError);
+        return res.status(400).json({ error: validationError });
     }
 
     const { cafeteria_id, items } = req.body;
+    const userId = req.user.id;
     let connection;
 
     try {
-        await wallet.ensureWallet(pool, userId); // outside the transaction on purpose, see wallet.js
         connection = await pool.getConnection();
         await connection.beginTransaction();
-        trace.push('BEGIN transaction');
 
+        // Ends the request without placing anything.
         const fail = async (status, error) => {
             await connection.rollback();
-            trace.push(`ROLLBACK: ${error}`);
-            return reject(status, error);
+            return res.status(status).json({ error });
         };
 
         const [[cafeteria]] = await connection.query('SELECT id FROM cafeterias WHERE id = ?', [cafeteria_id]);
         if (!cafeteria) {
             return fail(400, `cafeteria_id ${cafeteria_id} does not exist`);
         }
-        trace.push(`SELECT cafeterias: found ${cafeteria_id}`);
 
         const menuItemIds = items.map(item => item.menu_item_id);
         const placeholders = menuItemIds.map(() => '?').join(',');
@@ -120,15 +105,6 @@ router.post('/', requireAuth, async (req, res) => {
                 quantity
             };
         });
-        trace.push(`SELECT menu_items: ${menuItems.length} item(s), total KES ${total_amount} (prices from DB)`);
-
-        // Wallet check. FOR UPDATE locks this user's wallet row until COMMIT/ROLLBACK, so two orders
-        // placed at the same moment can't both spend the same shillings.
-        const walletBalance = await wallet.lockBalance(connection, userId);
-        trace.push(`SELECT wallets FOR UPDATE: balance KES ${walletBalance}`);
-        if (total_amount > walletBalance) {
-            return fail(422, new wallet.InsufficientFundsError(walletBalance, total_amount).message);
-        }
 
         // Budget check (Pesa Tracker). Only for users linked to a Pesa Tracker account (users.pesa_user_id).
         let pesaUserId = null;
@@ -139,14 +115,12 @@ router.post('/', requireAuth, async (req, res) => {
         if (pesaUserId) {
             try {
                 const budget = await pesaTracker.getBudget(pesaUserId);
-                trace.push(`Pesa Tracker GET budget: KES ${budget.remaining} remaining`);
                 if (total_amount > budget.remaining) {
                     return fail(422, `Order total KES ${total_amount} is more than your remaining food budget of KES ${budget.remaining}`);
                 }
             } catch (budgetErr) {
                 if (budgetErr instanceof pesaTracker.PesaTrackerError && budgetErr.status === 404) {
-                    // No budget set up on Pesa Tracker — allow the order without budget enforcement.
-                    trace.push('Pesa Tracker GET budget: no budget set, skipping budget check');
+                    // No budget set up on Pesa Tracker: the order goes ahead without budget enforcement.
                     pesaUserId = null;
                 } else {
                     throw budgetErr;
@@ -158,9 +132,7 @@ router.post('/', requireAuth, async (req, res) => {
             'INSERT INTO orders (user_id, cafeteria_id, status, total_amount) VALUES (?, ?, ?, ?)',
             [userId, cafeteria_id, 'pending', total_amount]
         );
-
         const orderId = orderResult.insertId;
-        trace.push(`INSERT orders: #${orderId} (pending, KES ${total_amount})`);
 
         for (const item of orderItemsToInsert) {
             await connection.query(
@@ -168,57 +140,45 @@ router.post('/', requireAuth, async (req, res) => {
                 [orderId, item.menu_item_id, item.item_name, item.item_price, item.quantity]
             );
         }
-        trace.push(`INSERT order_items: ${orderItemsToInsert.length} row(s)`);
-
-        const payment = await wallet.applyEntry(connection, userId, {
-            type: 'order_payment',
-            amount: -total_amount,
-            orderId,
-            description: `Order #${orderId}`,
-        });
-        trace.push(`UPDATE wallets: KES ${payment.balanceBefore} to KES ${payment.balanceAfter}`);
-        trace.push(`INSERT wallet_transactions: #${payment.transaction.id} (order_payment -${total_amount})`);
 
         // Record the purchase on Pesa Tracker BEFORE committing: it deducts the budget itself, and if it
         // refuses (or is down) the throw below rolls our order back, so nothing is left half-done.
         // Never also call their PATCH "deduct" for the same order - that would charge the student twice.
         if (pesaUserId) {
-            await pesaTracker.recordTransaction(pesaUserId, {
+            const transaction = await pesaTracker.recordTransaction(pesaUserId, {
                 orderId: `ord_${orderId}`,
                 amount: total_amount,
                 items: orderItemsToInsert.map(i => (i.quantity > 1 ? `${i.item_name} x${i.quantity}` : i.item_name))
             });
-            trace.push('Pesa Tracker POST transaction: recorded');
+            // Remember Pesa Tracker's id for this purchase: the wallet lists the orders that have one.
+            // (Their contract promises an id; the fallback only guards against losing the order after money moved.)
+            await connection.query('UPDATE orders SET pesa_transaction_id = ? WHERE id = ?', [transaction?.id ?? 'unknown', orderId]);
         }
 
         await connection.commit();
-        trace.push('COMMIT');
 
-        const order = {
+        // Only after COMMIT: tell the user's open tabs to reload their wallet.
+        if (pesaUserId) {
+            publish(userId, 'wallet.updated', { orderId });
+        }
+
+        res.status(201).json({
             id: orderId,
             cafeteria_id,
             status: 'pending',
             total_amount,
             items: orderItemsToInsert
-        };
-
-        // Only now, after COMMIT, tell the browser: what it shows is guaranteed to be in the DB.
-        publish(userId, 'wallet.updated', { balance: payment.balanceAfter, transaction: payment.transaction }, []);
-        publish(userId, 'order.created', { order: { ...order, created_at: new Date().toISOString() } }, trace);
-
-        res.status(201).json(order);
+        });
     } catch (err) {
         if (connection) {
             await connection.rollback();
         }
         if (err instanceof pesaTracker.PesaTrackerError) {
             const [status, error] = pesaTrackerErrorReply(err);
-            trace.push(`Pesa Tracker refused or failed (${err.status ?? err.code})`, `ROLLBACK: ${error}`);
-            return reject(status, error);
+            return res.status(status).json({ error });
         }
         console.error(err);
-        trace.push('ROLLBACK: unexpected server error');
-        return reject(500, 'Failed to place order');
+        res.status(500).json({ error: 'Failed to place order' });
     } finally {
         if (connection) connection.release();
     }
@@ -305,9 +265,7 @@ router.patch('/:id/status', requireAuth, requireAdmin, async (req, res) => {
         }
         await pool.query('UPDATE orders SET status = ? WHERE id = ?', [status, order.id]);
 
-        publish(order.user_id, 'order.updated', { id: order.id, status, previous: order.status }, [
-            `UPDATE orders: #${order.id} status ${order.status} to ${status}`,
-        ]);
+        publish(order.user_id, 'order.updated', { id: order.id, status, previous: order.status });
         res.json({ id: order.id, status });
     } catch (err) {
         console.error(err);

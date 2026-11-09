@@ -21,42 +21,68 @@ This is a group project designed to practice core React concepts (components, ro
 *   `src/App.css` — Global CSS styling sheets.
 
 
-## 💳 Wallet & live updates
+## 💳 Wallet (a read-only view of Pesa Tracker)
 
-Orders are paid from a per-user wallet, and the website updates the moment the database changes: the balance in the header, the statement, order statuses and a "Live activity" feed on `/wallet` that lists each backend step (BEGIN, SELECT … FOR UPDATE, INSERT, UPDATE, COMMIT/ROLLBACK).
+The wallet does not hold money. It shows two things from **Pesa Tracker** (Team 8's budget API) and nothing else:
 
-### Setup (existing databases)
+* **Food budget remaining**, read live from Pesa Tracker (`GET /users/{id}/budget`).
+* **Transactions**, the purchases we recorded there (`POST /users/{id}/transactions`), newest first.
 
-Run the migration once (safe to re-run). New databases created from `schema.sql` already include it.
+Nothing can be typed in: there is no top-up and no balance stored in our database.
 
-```bash
-mysql -u root -p strathsbites < server/migrations/001_wallet.sql
+### Linking a user to Pesa Tracker
+
+Each user has an optional `users.pesa_user_id`. Users without one see "not linked" on the wallet and order as normal.
+
+```sql
+UPDATE users SET pesa_user_id = 'usr_7f2a9c1e' WHERE email = '...';
 ```
 
-Users registered before the wallet existed get one automatically (KES 0) the first time it's used.
+Set `PESA_TRACKER_URL` and `PESA_TRACKER_API_KEY` in `server/.env` (see `.env.example`). Leave `PESA_TRACKER_URL` empty to switch the integration off.
 
-### How it stays in sync with the database
+### Setup
 
-* **The DB guards the money.** `wallets.balance` has `CHECK (balance >= 0)`, and every balance change writes one `wallet_transactions` row in the same DB transaction, so the ledger always adds up to the balance.
-* **No double spending.** Placing an order locks the user's wallet row (`SELECT … FOR UPDATE`) until COMMIT, so simultaneous orders queue instead of both spending the same money.
-* **Events only after COMMIT.** `server/events.js` pushes to the browser over `GET /api/events` (Server-Sent Events) only once the transaction has committed, so the page never shows anything the DB rolled back.
-* **Resync on reconnect.** On every (re)connect, and when the tab becomes visible again, the frontend reloads `/api/wallet` and `/api/orders/mine` from the DB.
+New databases created from `schema.sql` already have everything. A database that has the **old local wallet** (top-ups) needs the migration once; it adds `orders.pesa_transaction_id` and **drops** the old `wallets` and `wallet_transactions` tables:
 
-The event bus is in memory, so it reaches clients connected to the same Node process. If you run several server instances, replace `server/events.js` with Redis pub/sub (same `publish` / `subscribe` functions).
+```bash
+mysql -u root -p strathsbites < server/migrations/001_wallet_from_pesa_tracker.sql
+```
+
+### What happens at checkout (`POST /api/orders`, linked users)
+
+1. Read the remaining budget from Pesa Tracker. If the order total is more, answer **422** and place nothing.
+2. Save the order, then record the purchase on Pesa Tracker. It deducts the budget itself, so we never also call its `PATCH` "deduct".
+3. Save the transaction id Pesa Tracker returns on the order (`orders.pesa_transaction_id`). The wallet lists only orders that have one, so it lines up with what Pesa Tracker knows.
+4. If Pesa Tracker refuses or cannot be reached, the order is rolled back and the answer is **422** or **502**. Nothing is half-done.
+5. Only after the commit does the server tell the user's open tabs to reload their wallet.
+
+A linked user who has no budget set on Pesa Tracker can still order; there is no budget to enforce, so nothing is recorded there.
+
+### What the wallet shows (`status`)
+
+| `status` | Meaning |
+|----------|---------|
+| `ok` | `remaining` is the live number from Pesa Tracker |
+| `not_linked` | The user has no `pesa_user_id` (or the integration is switched off) |
+| `no_budget` | Linked, but Pesa Tracker has no budget for them yet |
+| `unavailable` | Pesa Tracker could not be reached; past transactions still show |
+
+### Live updates
+
+`server/events.js` pushes to the browser over `GET /api/events` (Server-Sent Events), only **after** the database commit. The page reloads `/api/wallet` when the connection opens, when the tab becomes visible again, and when it hears `wallet.updated` or `order.updated`. The event bus is in memory, so it reaches clients connected to the same Node process: run **one** server instance, or replace `server/events.js` with Redis pub/sub (same `publish` / `subscribe` functions).
 
 ### Endpoints (all need `Authorization: Bearer <token>`)
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/wallet` | Balance, last 25 statement rows, Pesa Tracker budget if linked |
-| POST | `/api/wallet/topup` | `{ "amount": 500 }`, a whole number from 1 to 50,000. **Simulated**; this is where an M-Pesa callback would go |
-| GET | `/api/events` | Live event stream: `wallet.updated`, `order.created`, `order.updated`, `order.rejected` |
+| GET | `/api/wallet` | `{ status, remaining, currency, transactions }` (read-only) |
+| GET | `/api/events` | Live event stream: `wallet.updated`, `order.updated` |
 | GET | `/api/orders/mine` | Your orders, with cafeteria name and line items |
 | PATCH | `/api/orders/:id/status` | **Admin only.** `{ "status": "confirmed" }` (`pending` / `confirmed` / `completed`); the customer's page updates live |
 
-`POST /api/orders` is unchanged for API consumers (same request and response). It now also returns **422** when the wallet balance is lower than the order total.
+`POST /api/orders` answers **422** when a linked user's order is more than their remaining Pesa Tracker budget, and **502** when Pesa Tracker cannot be reached or errors for a linked user (the order is not placed).
 
-To try the admin status update, make a user an admin with `UPDATE users SET role = 'admin' WHERE email = '…';`, then log in again to get a token with the new role.
+To try the admin status update, make a user an admin with `UPDATE users SET role = 'admin' WHERE email = '...';`, then log in again to get a token with the new role.
 
 ### Configuration
 
@@ -64,4 +90,4 @@ The frontend reads the API address from `VITE_API_URL` (default `http://localhos
 
 ### Tests
 
-`npm test` in `server/` runs against your MySQL database (the wallet migration must be applied). `__tests__/wallet.test.js` covers top-ups, payments, insufficient funds, simultaneous orders, the ledger adding up, and the live event stream.
+`npm test` in `server/` runs against your MySQL database (built from `schema.sql`). Pesa Tracker is replaced by a stand-in server (`__tests__/fakePesa.js`), so the tests never contact the real service. `__tests__/wallet.test.js` covers the read-only wallet, "remaining drops after an order", the transaction list, the missing top-up routes, and the live event stream; `__tests__/budget.test.js` covers the checkout budget rules.

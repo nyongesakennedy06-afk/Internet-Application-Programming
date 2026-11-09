@@ -22,7 +22,7 @@ router.get('/', requireAuth, (req, res) => {
     const send = (event) => res.write(`id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`);
 
     // Tells the client the stream is open; it then reloads /api/wallet to catch anything it missed.
-    send({ id: 0, type: 'stream.ready', at: new Date().toISOString(), data: {}, trace: [] });
+    send({ id: 0, type: 'stream.ready', at: new Date().toISOString(), data: {} });
 
     const unsubscribe = subscribe(req.user.id, send);
     const heartbeat = setInterval(() => res.write(': keep-alive\n\n'), HEARTBEAT_MS);

@@ -18,12 +18,11 @@ const channel = (userId) => `user:${userId}`;
 
 /**
  * @param {number} userId  who should see it
- * @param {string} type    e.g. 'wallet.updated', 'order.created', 'order.updated', 'order.rejected'
+ * @param {string} type    'wallet.updated' (a purchase was recorded) or 'order.updated' (an order's status changed)
  * @param {object} data    payload for the client
- * @param {string[]} [trace] the DB / backend steps that produced this, in order, for the activity feed
  */
-export function publish(userId, type, data, trace = []) {
-    const event = { id: ++sequence, type, at: new Date().toISOString(), data, trace };
+export function publish(userId, type, data) {
+    const event = { id: ++sequence, type, at: new Date().toISOString(), data };
     bus.emit(channel(userId), event);
     return event;
 }

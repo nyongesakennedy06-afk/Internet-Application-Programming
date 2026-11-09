@@ -12,8 +12,8 @@ const CheckoutPage = () => {
   const navigate = useNavigate();
 
   const total = getTotal();
-  const balance = wallet?.balance;
-  const shortBy = wallet ? Math.max(0, total - balance) : 0;
+  const remaining = wallet?.status === 'ok' ? wallet.remaining : null; // food budget left on Pesa Tracker
+  const shortBy = remaining != null ? Math.max(0, total - remaining) : 0;
 
   const [placing, setPlacing] = useState(false);
   const [error, setError] = useState('');
@@ -101,23 +101,30 @@ const CheckoutPage = () => {
             <h3>Total: KES {total}</h3>
           </div>
 
-          <dl className='checkout-wallet' aria-live='polite'>
-            <div>
-              <dt>Wallet balance</dt>
-              <dd>{wallet ? formatKES(balance) : 'Loading…'}</dd>
-            </div>
-            <div>
-              <dt>This order</dt>
-              <dd>−{formatKES(total)}</dd>
-            </div>
-            <div className='checkout-wallet-after'>
-              <dt>After this order</dt>
-              <dd>{!wallet ? '…' : shortBy > 0 ? 'Not enough funds' : formatKES(balance - total)}</dd>
-            </div>
-          </dl>
+          {remaining != null && (
+            <dl className='checkout-wallet' aria-live='polite'>
+              <div>
+                <dt>Food budget remaining</dt>
+                <dd>{formatKES(remaining)}</dd>
+              </div>
+              <div>
+                <dt>This order</dt>
+                <dd>−{formatKES(total)}</dd>
+              </div>
+              <div className='checkout-wallet-after'>
+                <dt>After this order</dt>
+                <dd>{shortBy > 0 ? 'Over budget' : formatKES(remaining - total)}</dd>
+              </div>
+            </dl>
+          )}
           {shortBy > 0 && (
             <p className='checkout-short'>
-              You need {formatKES(shortBy)} more to place this order. <Link to='/wallet'>Add funds to your wallet</Link>
+              This order is {formatKES(shortBy)} more than your remaining food budget, so it can't be placed. Remove something from your cart to continue.
+            </p>
+          )}
+          {wallet?.status === 'unavailable' && (
+            <p className='checkout-short'>
+              Pesa Tracker is not reachable right now, so your food budget can't be checked and orders can't be placed until it is back.
             </p>
           )}
 

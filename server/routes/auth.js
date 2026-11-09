@@ -26,8 +26,6 @@ router.post('/register', async (req, res) => {
 
         const [result] = await pool.query('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)', [name, email, password_hash, 'user']);
 
-        await pool.query('INSERT IGNORE INTO wallets (user_id, balance) VALUES (?, 0)', [result.insertId]);
-
         const payload = { id: result.insertId, name, email, role: 'user' };
         const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
 
