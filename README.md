@@ -91,3 +91,14 @@ The frontend reads the API address from `VITE_API_URL` (default `http://localhos
 ### Tests
 
 `npm test` in `server/` runs against your MySQL database (built from `schema.sql`). Pesa Tracker is replaced by a stand-in server (`__tests__/fakePesa.js`), so the tests never contact the real service. `__tests__/wallet.test.js` covers the read-only wallet, "remaining drops after an order", the transaction list, the missing top-up routes, and the live event stream; `__tests__/budget.test.js` covers the checkout budget rules.
+
+
+### Rate limit
+The Team 10 endpoints (`GET /api/orders` and `GET /api/users/{id}/order-frequency`) allow
+**100 requests per minute per team**. Past that, the API answers `429 Too Many Requests` with a
+`Retry-After` header (seconds to wait) and a body like:
+
+    { "error": "Too many requests", "retryAfter": 42 }
+
+Wait that many seconds and try again. Change the limit with `RATE_LIMIT_MAX` and
+`RATE_LIMIT_WINDOW_MS` in `server/.env`.

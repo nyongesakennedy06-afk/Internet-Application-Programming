@@ -157,6 +157,19 @@ paths:
                 type: object
                 properties:
                   error: { type: string, example: "API key is required" }
+        '429':
+          description: Too many requests. Your team has used its allowance for the current window (100 requests per minute). Wait the number of seconds in Retry-After, then try again.
+          headers:
+            Retry-After:
+              description: Seconds until you may call again
+              schema: { type: integer, example: 42 }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "Too many requests" }
+                  retryAfter: { type: integer, example: 42 }
         '404':
           description: No user exists with the given userId
           content:
@@ -210,6 +223,19 @@ paths:
                 type: object
                 properties:
                   error: { type: string, example: "API key is required" }
+        '429':
+          description: Too many requests. Your team has used its allowance for the current window (100 requests per minute). Wait the number of seconds in Retry-After, then try again.
+          headers:
+            Retry-After:
+              description: Seconds until you may call again
+              schema: { type: integer, example: 42 }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: "Too many requests" }
+                  retryAfter: { type: integer, example: 42 }
         '404':
           description: No user or location found
           content:

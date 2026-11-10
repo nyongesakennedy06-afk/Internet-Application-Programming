@@ -8,3 +8,4 @@ import { TEST_API_KEY } from './testKey.js';
 
 process.env.API_KEYS = `jest:${TEST_API_KEY}`;
 process.env.PESA_TRACKER_URL = '';
+process.env.RATE_LIMIT_MAX = '1000';

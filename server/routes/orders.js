@@ -2,6 +2,7 @@ import express from 'express';
 import { pool } from '../db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { requireApiKey } from '../middleware/apiKey.js';
+import { rateLimit } from '../middleware/rateLimit.js';
 import * as pesaTracker from '../pesaTracker.js';
 import { publish } from '../events.js';
 
@@ -188,7 +189,7 @@ router.post('/', requireAuth, async (req, res) => {
 // Turns a DB date into "2026-08-13T10:00:00Z" (no milliseconds), as the contract promises.
 const toIsoDate = (value) => new Date(value).toISOString().replace(/\.\d{3}Z$/, 'Z');
 
-router.get('/', requireApiKey, async (req, res) => {
+router.get('/', requireApiKey, rateLimit, async (req, res) => {
     const userId = Number(req.query.userId);
     const { fields } = req.query;
 

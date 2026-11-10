@@ -1,11 +1,12 @@
 import express from 'express';
 import { pool } from '../db.js';
 import { requireApiKey } from '../middleware/apiKey.js';
+import { rateLimit } from '../middleware/rateLimit.js';
 
 const router = express.Router();
 
 // Contract: GET /users/{id}/order-frequency?locationId={cafeteria id}  (Team 10)
-router.get('/:id/order-frequency', requireApiKey, async (req, res) => {
+router.get('/:id/order-frequency', requireApiKey, rateLimit, async (req, res) => {
     const { locationId } = req.query;
     if (typeof locationId !== 'string' || locationId === '') {
         return res.status(400).json({ error: 'locationId is required' });
