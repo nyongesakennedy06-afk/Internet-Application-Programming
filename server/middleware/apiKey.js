@@ -46,5 +46,6 @@ export const requireApiKey = (req, res, next) => {
 
     // Attach the consumer name so later middleware / handlers can log it.
     req.apiConsumer = consumer;
+    req.apiKey = provided; // only so the request log can show a hashed label (never logged itself)
     next();
 };

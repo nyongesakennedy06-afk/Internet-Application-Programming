@@ -102,3 +102,40 @@ The Team 10 endpoints (`GET /api/orders` and `GET /api/users/{id}/order-frequenc
 
 Wait that many seconds and try again. Change the limit with `RATE_LIMIT_MAX` and
 `RATE_LIMIT_WINDOW_MS` in `server/.env`.
+
+### Logs and /stats (monitoring)
+
+**Request log.** Every request prints one line of JSON when it finishes, including requests rejected with 401 or 429:
+
+    {"time":"2026-11-11T10:00:00.000Z","method":"GET","path":"/api/orders","status":200,"ms":5.2,"caller":"key-dc87f9"}
+
+`caller` is a short fingerprint of the API key (`none` when there is no valid key), never the key itself. Query strings, request bodies, tokens and passwords are never logged. To keep a copy (`*.log` is already git-ignored):
+
+```bash
+cd server && node index.js | tee requests.log
+```
+
+**`GET /api/stats`** shows running totals since the server started. It needs an API key, like the other partner endpoints:
+
+```bash
+curl -s -H "X-API-Key: <your-api-key>" http://localhost:4000/api/stats
+```
+
+```json
+{
+  "startedAt": "2026-11-11T10:00:00.000Z",
+  "uptimeSeconds": 120,
+  "total": 6,
+  "clientErrors": 5,
+  "serverErrors": 1,
+  "errorRatePercent": 16.7,
+  "avgMs": 2.2,
+  "routes": {
+    "GET /api/orders": { "count": 4, "clientErrors": 3, "serverErrors": 1, "avgMs": 2.6, "maxMs": 8.4 }
+  }
+}
+```
+
+`clientErrors` are 4xx (usually the caller's mistake), `serverErrors` are 5xx (ours); `errorRatePercent` uses 5xx only. Routes are grouped by pattern (`/api/orders/:id`, not each id). The row `(no route)` holds requests that never reached a route (a 404 for an unknown path). The numbers live in memory, so they reset on restart, and `/api/stats` does not count itself until the next call.
+
+**Traffic generator** (GET requests only, never places orders): `cd server && KEY=<your-api-key> N=60 node tools/traffic.js`
