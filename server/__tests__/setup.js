@@ -8,4 +8,9 @@ import { TEST_API_KEY } from './testKey.js';
 
 process.env.API_KEYS = `jest:${TEST_API_KEY}`;
 process.env.PESA_TRACKER_URL = '';
-process.env.RATE_LIMIT_MAX = '1000';
+process.env.RATE_LIMIT_MAX = '1000'; // from Week 9: a low demo limit in .env must not break the tests
+process.env.PESA_RETRY_DELAY_MS = '1'; // keep failure tests fast: tiny waits between retries
+
+// The "retrying in ..." log lines are expected when tests make Pesa Tracker fail on purpose. Hide just those.
+const realWarn = console.warn;
+console.warn = (...args) => { if (!String(args[0]).includes('retrying in')) realWarn(...args); };

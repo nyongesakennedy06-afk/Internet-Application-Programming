@@ -6,6 +6,9 @@ import { formatKES, formatSignedKES } from '../api.js';
 const dateTime = (iso) =>
     new Date(iso).toLocaleString('en-KE', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
+const timeOnly = (iso) =>
+    new Date(iso).toLocaleTimeString('en-KE', { hour: '2-digit', minute: '2-digit' });
+
 const STATUS_MESSAGE = {
     not_linked: 'Your Pesa Tracker account is not linked yet, so there is no food budget to show.',
     no_budget: 'You have not set a food budget on Pesa Tracker yet.',
@@ -29,9 +32,15 @@ const BalancePanel = () => {
             <div className="balance-panel-figure" aria-live="polite">
                 <span className="balance-panel-amount">{!wallet ? 'KES …' : ok ? formatKES(wallet.remaining) : '—'}</span>
             </div>
-            <p className="balance-panel-pesa">
-                {wallet && !ok ? STATUS_MESSAGE[wallet.status] : 'From your Pesa Tracker food budget. It goes down when you place an order.'}
-            </p>
+            {wallet?.stale ? (
+                <p className="stale-banner" role="status">
+                    Showing your saved budget from {timeOnly(wallet.asOf)}. Pesa Tracker is not responding, so this amount may be out of date.
+                </p>
+            ) : (
+                <p className="balance-panel-pesa">
+                    {wallet && !ok ? STATUS_MESSAGE[wallet.status] : 'From your Pesa Tracker food budget. It goes down when you place an order.'}
+                </p>
+            )}
         </section>
     );
 };

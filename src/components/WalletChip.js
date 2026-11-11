@@ -13,7 +13,7 @@ export const CONNECTION_LABEL = {
 const chipText = (wallet) => {
     if (!wallet) return 'KES …';
     switch (wallet.status) {
-        case 'ok': return formatKES(wallet.remaining);
+        case 'ok': return wallet.stale ? `${formatKES(wallet.remaining)} (saved)` : formatKES(wallet.remaining);
         case 'not_linked': return 'No budget linked';
         case 'no_budget': return 'No budget set';
         default: return 'Budget unavailable';

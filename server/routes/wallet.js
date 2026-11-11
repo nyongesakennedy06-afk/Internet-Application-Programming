@@ -2,6 +2,7 @@ import express from 'express';
 import { pool } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import * as pesaTracker from '../pesaTracker.js';
+import { saveBudget, getSavedBudget, forgetBudget } from '../savedBudgets.js';
 
 const router = express.Router();
 
@@ -15,7 +16,11 @@ const TRANSACTION_LIMIT = 25;
 //   ok           remaining is the live number
 //   not_linked   this user has no Pesa Tracker account linked (users.pesa_user_id is empty)
 //   no_budget    linked, but Pesa Tracker says no budget is set up yet
-//   unavailable  Pesa Tracker could not be reached or returned an error
+//   unavailable  Pesa Tracker could not be reached or returned an error, and we have nothing saved for this user
+//
+// When Pesa Tracker cannot be reached but we read this user's budget successfully before, the answer is
+// status "ok" with the saved amount plus  stale: true  and  asOf  (when it was saved), so the page can say
+// the number may be out of date. Live answers carry neither field.
 router.get('/', requireAuth, async (req, res) => {
     try {
         const [[account]] = await pool.query('SELECT pesa_user_id FROM users WHERE id = ?', [req.user.id]);
@@ -23,14 +28,24 @@ router.get('/', requireAuth, async (req, res) => {
 
         let status = 'not_linked';
         let remaining = null;
+        let saved = null; // set only when remaining is a saved copy
 
         if (pesaTracker.isEnabled() && pesaUserId) {
             try {
                 const budget = await pesaTracker.getBudget(pesaUserId);
                 status = 'ok';
                 remaining = budget.remaining;
+                saveBudget(req.user.id, remaining);
             } catch (err) {
-                status = err.status === 404 ? 'no_budget' : 'unavailable';
+                if (err.status === 404) {
+                    status = 'no_budget'; // a real answer: nothing to show, and nothing worth keeping
+                    forgetBudget(req.user.id);
+                } else {
+                    // The failure is already in the log (with the reason). Show saved data if we have it.
+                    saved = getSavedBudget(req.user.id);
+                    status = saved ? 'ok' : 'unavailable';
+                    remaining = saved ? saved.remaining : null;
+                }
             }
         }
 
@@ -51,6 +66,7 @@ router.get('/', requireAuth, async (req, res) => {
         res.json({
             status,
             remaining,
+            ...(saved && { stale: true, asOf: saved.asOf }),
             currency: 'KES',
             transactions: orders.map((o) => ({
                 id: o.id,

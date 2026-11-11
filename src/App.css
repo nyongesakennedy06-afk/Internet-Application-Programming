@@ -834,3 +834,13 @@
   0% { color: gold; text-shadow: 0 0 10px rgba(255, 215, 0, 0.7); }
   100% { color: inherit; text-shadow: none; }
 }
+
+/* ── Saved-budget banner (Week 11): shown when Pesa Tracker cannot be reached ── */
+.stale-banner {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--sb-warn-bg);
+  color: var(--sb-warn-text);
+  font-size: 0.9rem;
+}
